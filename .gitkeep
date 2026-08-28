@@ -1,0 +1,5 @@
+touch input/.gitkeep
+touch output/.gitkeep
+touch snapshot/.gitkeep
+touch tools/.gitkeep
+touch .github/workflows/.gitkeep

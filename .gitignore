@@ -1,0 +1,14 @@
+# Inputs grandes / snapshots
+input/*.zip
+snapshot/
+
+# Outputs generados
+output/
+
+# Python
+__pycache__/
+*.pyc
+
+# VS Code / sistema
+.vscode/
+.DS_Store
