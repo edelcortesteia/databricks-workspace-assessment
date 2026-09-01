@@ -477,72 +477,178 @@ def looks_like_sql(text):
     return False
 
 
-def extract_sql_blocks(code):
-    """
-    Extrae bloques SQL reales.
 
-    Soporta:
-      spark.sql("SELECT ...")
-      spark.sql(" ... ")
-      spark.sql(s" ... ")
-      val query = " ... "
-      val query = s" ... "
+def variable_consumed_by_jdbc(variable, notebook_code):
+    '''
+    Determina si una variable que contiene SQL termina siendo consumida
+    por una API JDBC / conexión SQL externa.
+    '''
 
-      Con una o triple comilla
-    Solo conserva textos que parezcan SQL real.
-    """
+    if not variable:
+        return False
+
+    v = re.escape(variable)
+
+    patterns = [
+        rf'\.jdbc\s*\([^)]*\btable\s*=\s*{v}\b',
+        rf'\.jdbc\s*\([^,]+,\s*{v}\b',
+        rf'\bprepareStatement\s*\(\s*{v}\s*\)',
+        rf'\bexecuteQuery\s*\(\s*{v}\s*\)',
+        rf'\bexecuteUpdate\s*\(\s*{v}\s*\)',
+        rf'\bexecute\s*\(\s*{v}\s*\)',
+    ]
+
+    return any(
+        re.search(
+            pattern,
+            notebook_code,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        for pattern in patterns
+    )
+
+
+def notebook_has_jdbc_context(code):
+    '''
+    Señales técnicas de JDBC. No depende del nombre del schema.
+    '''
+
+    patterns = [
+        r'\bspark\.read\.jdbc\s*\(',
+        r'\.jdbc\s*\(',
+        r'\bprepareStatement\s*\(',
+        r'\bDriverManager\.getConnection\s*\(',
+        r'\bjdbc:[A-Za-z0-9_]+:',
+        r'\borg\.postgresql\.Driver\b',
+    ]
+
+    return any(
+        re.search(
+            pattern,
+            code,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+        for pattern in patterns
+    )
+
+
+def extract_sql_blocks(code, notebook_code):
+    '''
+    Extrae SQL embebido y conserva su contexto técnico.
+
+    Retorna:
+        (sql, data_source)
+
+    data_source:
+        SPARK_HIVE -> spark.sql / SQL ejecutado por Spark
+        JDBC       -> SQL consumido por JDBC
+        UNKNOWN    -> SQL real cuyo motor no puede demostrarse
+    '''
 
     sql_blocks = []
 
-    # --------------------------------------------------
-    # 1. spark.sql("...")
-    # --------------------------------------------------
-
-    single_line_pattern = re.compile(
-        r'''(?is)
+    # 1. spark.sql(...)
+    spark_sql_pattern = re.compile(
+        r'''(?isx)
         spark\.sql
-        \s*
-        \(
-        \s*
-        s?
-        ["']
-        (.*?)
-        ["']
-        \s*
-        \)
-        ''',
-        re.VERBOSE
+        \s*\(
+        \s*s?
+        (?:
+            \"\"\"(.*?)\"\"\"
+            |
+            "([^"]*?)"
+            |
+            '([^']*?)'
+        )
+        \s*\)
+        '''
     )
 
-    for match in single_line_pattern.finditer(code):
+    spark_ranges = []
 
-        candidate = match.group(1)
+    for match in spark_sql_pattern.finditer(code):
+
+        candidate = next(
+            (group for group in match.groups() if group is not None),
+            ""
+        )
 
         if looks_like_sql(candidate):
-            sql_blocks.append(candidate)
+            sql_blocks.append((candidate, "SPARK_HIVE"))
+            spark_ranges.append((match.start(), match.end()))
 
-    # --------------------------------------------------
-    # 2. Strings multilínea """
-    # --------------------------------------------------
-
-    triple_string_pattern = re.compile(
-        r'''(?is)
+    # 2. Strings SQL asignados a variable
+    assignment_pattern = re.compile(
+        r'''(?isx)
+        \b(?:val|var)\s+
+        ([A-Za-z_]\w*)
+        (?:\s*:\s*[^=]+)?
+        \s*=\s*
         s?
-        """
+        \"\"\"
         (.*?)
-        """
-        ''',
-        re.VERBOSE
+        \"\"\"
+        '''
+    )
+
+    covered_ranges = list(spark_ranges)
+
+    for match in assignment_pattern.finditer(code):
+
+        variable = match.group(1)
+        candidate = match.group(2)
+
+        if not looks_like_sql(candidate):
+            continue
+
+        if any(
+            range_start <= match.start() < range_end
+            for range_start, range_end in spark_ranges
+        ):
+            continue
+
+        data_source = (
+            "JDBC"
+            if variable_consumed_by_jdbc(variable, notebook_code)
+            else "UNKNOWN"
+        )
+
+        sql_blocks.append((candidate, data_source))
+        covered_ranges.append((match.start(), match.end()))
+
+    # 3. Triple strings SQL no asignados
+    triple_string_pattern = re.compile(
+        r'''(?isx)
+        s?
+        \"\"\"
+        (.*?)
+        \"\"\"
+        '''
     )
 
     for match in triple_string_pattern.finditer(code):
 
+        if any(
+            range_start <= match.start() < range_end
+            for range_start, range_end in covered_ranges
+        ):
+            continue
+
         candidate = match.group(1)
 
-        if looks_like_sql(candidate):
-            sql_blocks.append(candidate)
+        if not looks_like_sql(candidate):
+            continue
+
+        data_source = (
+            "JDBC"
+            if notebook_has_jdbc_context(code)
+            else "UNKNOWN"
+        )
+
+        sql_blocks.append((candidate, data_source))
 
     return sql_blocks
+
 
 # --------------------------------------------------
 # 5. Clasificar formato de referencia
@@ -624,6 +730,13 @@ for notebook in sorted(used_notebooks):
             notebook_path
         )
 
+        notebook_code = "\n".join(
+            remove_sql_comments_from_triple_strings(
+                remove_comments(block)
+            )
+            for block in blocks
+        )
+
         temp_views = set()
 
         for block_index, original_code in enumerate(blocks):
@@ -677,7 +790,8 @@ for notebook in sorted(used_notebooks):
                             table_reference,
                             temp_views
                         ),
-                        "jobs": jobs_value
+                        "jobs": jobs_value,
+                        "data_source": "SPARK_HIVE"
                     })
 
             # --------------------------------------
@@ -693,6 +807,7 @@ for notebook in sorted(used_notebooks):
                 "unknown"
             )
 
+            # Cada elemento conserva (sql, data_source)
             sql_blocks = []
 
             # --------------------------------------------------
@@ -701,7 +816,7 @@ for notebook in sorted(used_notebooks):
 
             if language == "sql":
 
-                sql_blocks.append(code)
+                sql_blocks.append((code, "SPARK_HIVE"))
 
             # --------------------------------------------------
             # Databricks MAGIC %sql dentro de notebook
@@ -727,7 +842,7 @@ for notebook in sorted(used_notebooks):
                     flags=re.IGNORECASE
                 )
 
-                sql_blocks.append(sql_code)
+                sql_blocks.append((sql_code, "SPARK_HIVE"))
 
             # --------------------------------------------------
             # Scala / Python con SQL embebido
@@ -738,11 +853,14 @@ for notebook in sorted(used_notebooks):
             else:
 
                 sql_blocks.extend(
-                    extract_sql_blocks(code)
+                    extract_sql_blocks(
+                        code,
+                        notebook_code
+                    )
                 )        
 
 
-            for sql_code in sql_blocks:
+            for sql_code, data_source in sql_blocks:
 
                 # Limpiar comentarios SQL dentro del bloque
                 sql_code = re.sub(
@@ -778,7 +896,8 @@ for notebook in sorted(used_notebooks):
                             table_reference,
                             temp_views
                         ),
-                        "jobs": jobs_value
+                        "jobs": jobs_value,
+                        "data_source": data_source
                     })
 
     except Exception as e:
@@ -801,7 +920,8 @@ for row in rows:
         row["notebook"],
         row["cell"],
         row["reference_type"],
-        row["table_reference"]
+        row["table_reference"],
+        row["data_source"]
     )
 
     if key in seen:
@@ -844,7 +964,8 @@ with open(
         "reference_type",
         "table_reference",
         "name_format",
-        "jobs"
+        "jobs",
+        "data_source"
     ]
 
     writer = csv.DictWriter(
@@ -862,15 +983,17 @@ with open(
 
 type_counts = defaultdict(int)
 format_counts = defaultdict(int)
+source_counts = defaultdict(int)
 
 for row in rows:
     type_counts[row["reference_type"]] += 1
     format_counts[row["name_format"]] += 1
+    source_counts[row["data_source"]] += 1
 
 
 print("=" * 60)
 print("ASSESSMENT WORKSPACE - PASO 08")
-print("REFERENCIAS DE TABLAS - NOTEBOOKS UTILIZADOS")
+print("REFERENCIAS DE TABLAS Y ORIGEN DE DATOS - NOTEBOOKS UTILIZADOS - V2.1")
 print("=" * 60)
 
 print()
@@ -891,6 +1014,15 @@ for name_format in sorted(format_counts):
     print(
         f" - {name_format:<20}: "
         f"{format_counts[name_format]}"
+    )
+
+print()
+print("Resumen por origen de datos:")
+
+for data_source in sorted(source_counts):
+    print(
+        f" - {data_source:<20}: "
+        f"{source_counts[data_source]}"
     )
 
 print()

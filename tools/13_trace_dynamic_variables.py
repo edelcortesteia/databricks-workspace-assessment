@@ -13,6 +13,7 @@ OUTPUT_FILE = Path('output/dynamic_variable_trace.csv')
 
 FIELDS = [
     'notebook','cell','variable','source_type','source_category','source_expression',
+    'data_source','migration_scope',
     'trace_method','trace_depth','config_paths','pro_values','uc_values','resolved_literals','trace_status',
     'trace','used_by_dynamic_table','dynamic_table_references','jobs'
 ]
@@ -433,7 +434,7 @@ def resolve_parameter(fn,var,local,whole):
     return res
 
 def main():
-    print('='*70); print('ASSESSMENT WORKSPACE - PASO 13'); print('TRAZABILIDAD DE VARIABLES DINAMICAS - V3.1'); print('='*70); print()
+    print('='*70); print('ASSESSMENT WORKSPACE - PASO 13'); print('TRAZABILIDAD DE VARIABLES DINAMICAS - V3.2'); print('='*70); print()
     pro_config=load_json(PRO_CONFIG_FILE); uc_config=load_json(UC_CONFIG_FILE)
     nbs=load_csv(NOTEBOOKS_FILE); jobs=load_csv(JOB_INVENTORY_FILE); rows=load_csv(DYNAMIC_INVENTORY_FILE)
     mapping={clean(r.get('workspace_path')):project_path(r.get('local_file') or r.get('path')) for r in nbs if clean(r.get('workspace_path'))}
@@ -447,6 +448,8 @@ def main():
     output=[]
     for row in pending:
         nb=clean(row.get('notebook')); var=clean(row.get('variable')); typ=clean(row.get('source_type')); expr=clean(row.get('source_expression'))
+        data_source=clean(row.get('data_source')) or 'UNKNOWN'
+        migration_scope=clean(row.get('migration_scope')) or 'REQUIRES_REVIEW'
         whole=all_code.get(nb,''); bs=all_blocks.get(nb,[])
         try: ci=int(clean(row.get('cell')))-1
         except: ci=-1
@@ -479,19 +482,28 @@ def main():
         elif method=='FUNCTION_CALL': status='UNRESOLVED_FUNCTION_ARGUMENT'
         elif method=='ITERATOR_COLLECTION': status='UNRESOLVED_ITERATOR_SOURCE'
         else: status='PARTIAL_TRACE'
-        output.append({'notebook':nb,'cell':clean(row.get('cell')),'variable':var,'source_type':typ,'source_category':clean(row.get('source_category')),'source_expression':expr,'trace_method':method,'trace_depth':result['depth'],'config_paths':' | '.join(ps),'pro_values':' | '.join(pro_values),'uc_values':' | '.join(uc_values),'resolved_literals':' | '.join(lits),'trace_status':status,'trace':' -> '.join(tr),'used_by_dynamic_table':clean(row.get('used_by_dynamic_table')),'dynamic_table_references':clean(row.get('dynamic_table_references')),'jobs':clean(row.get('jobs'))})
+        output.append({'notebook':nb,'cell':clean(row.get('cell')),'variable':var,'source_type':typ,'source_category':clean(row.get('source_category')),'source_expression':expr,'data_source':data_source,'migration_scope':migration_scope,'trace_method':method,'trace_depth':result['depth'],'config_paths':' | '.join(ps),'pro_values':' | '.join(pro_values),'uc_values':' | '.join(uc_values),'resolved_literals':' | '.join(lits),'trace_status':status,'trace':' -> '.join(tr),'used_by_dynamic_table':clean(row.get('used_by_dynamic_table')),'dynamic_table_references':clean(row.get('dynamic_table_references')),'jobs':clean(row.get('jobs'))})
     output.sort(key=lambda r:(r['notebook'].casefold(),r['variable'].casefold(),int(r['cell']) if r['cell'].isdigit() else 0))
     OUTPUT_FILE.parent.mkdir(parents=True,exist_ok=True)
     with OUTPUT_FILE.open('w',newline='',encoding='utf-8-sig') as f: w=csv.DictWriter(f,fieldnames=FIELDS); w.writeheader(); w.writerows(output)
     methods=Counter(r['trace_method'] for r in output); statuses=Counter(r['trace_status'] for r in output)
-    active=[r for r in output if clean(r['used_by_dynamic_table']).casefold()=='true']; resolved=[r for r in active if r['trace_status'].startswith('RESOLVED_')]
-    print('--- Entradas ---'); print(f'Configuración PRO              : {PRO_CONFIG_FILE}'); print(f'Configuración UC               : {UC_CONFIG_FILE}'); print(f'Variables Paso 12              : {len(rows)}'); print(f'Variables que requieren trace  : {len(pending)}'); print(f'Notebooks de jobs cargados     : {len(all_code)}'); print(f'Archivos faltantes             : {len(missing)}'); print(); print('--- Resultado ---'); print(f'Trazas generadas               : {len(output)}'); print(f'Trazas activas en tablas       : {len(active)}'); print(f'Activas resueltas              : {len(resolved)}'); print(f'Activas pendientes             : {len(active)-len(resolved)}'); print(); print('Resumen por método:')
+    data_sources=Counter(r['data_source'] for r in output); scopes=Counter(r['migration_scope'] for r in output)
+    active=[r for r in output if clean(r['used_by_dynamic_table']).casefold()=='true']
+    resolved=[r for r in active if r['trace_status'].startswith('RESOLVED_')]
+    active_hive=[r for r in active if r['migration_scope']=='HMS_TO_UC']
+    active_hive_resolved=[r for r in active_hive if r['trace_status'].startswith('RESOLVED_')]
+    active_jdbc=[r for r in active if r['migration_scope']=='OUT_OF_SCOPE_JDBC']
+    print('--- Entradas ---'); print(f'Configuración PRO              : {PRO_CONFIG_FILE}'); print(f'Configuración UC               : {UC_CONFIG_FILE}'); print(f'Variables Paso 12              : {len(rows)}'); print(f'Variables que requieren trace  : {len(pending)}'); print(f'Notebooks de jobs cargados     : {len(all_code)}'); print(f'Archivos faltantes             : {len(missing)}'); print(); print('--- Resultado ---'); print(f'Trazas generadas               : {len(output)}'); print(f'Trazas activas en tablas       : {len(active)}'); print(f'Activas resueltas              : {len(resolved)}'); print(f'Activas pendientes             : {len(active)-len(resolved)}'); print(f' - HMS_TO_UC activas           : {len(active_hive)}'); print(f'   resueltas                   : {len(active_hive_resolved)}'); print(f'   pendientes                  : {len(active_hive)-len(active_hive_resolved)}'); print(f' - JDBC fuera de alcance       : {len(active_jdbc)}'); print(); print('Resumen por data_source:')
+    for k in sorted(data_sources): print(f' - {k:<30}: {data_sources[k]}')
+    print(); print('Resumen por migration_scope:')
+    for k in sorted(scopes): print(f' - {k:<30}: {scopes[k]}')
+    print(); print('Resumen por método:')
     for k in sorted(methods): print(f' - {k:<30}: {methods[k]}')
     print(); print('Resumen por estado:')
     for k in sorted(statuses): print(f' - {k:<36}: {statuses[k]}')
-    pend=[r for r in active if not r['trace_status'].startswith('RESOLVED_')]
+    pend=[r for r in active_hive if not r['trace_status'].startswith('RESOLVED_')]
     if pend:
-        print(); print('Pendientes activos:')
+        print(); print('Pendientes activos HMS_TO_UC:')
         for r in pend: print(f" - {Path(r['notebook']).name} | cell {r['cell']} | {r['variable']} | {r['trace_status']} | {r['source_expression']}")
     print(); print(f'Archivo generado: {OUTPUT_FILE.resolve()}'); print(); print('='*70); print('RESULTADO: TRAZABILIDAD DINAMICA GENERADA CORRECTAMENTE'); print('='*70)
 

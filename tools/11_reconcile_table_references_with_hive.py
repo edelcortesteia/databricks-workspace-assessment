@@ -11,6 +11,7 @@ OUTPUT_FILE = Path("output/table_hive_reconciliation.csv")
 OUTPUT_COLUMNS = [
     "object_key",
     "source_kind",
+    "data_source",
     "table_reference",
     "normalized_reference",
     "schema",
@@ -102,7 +103,7 @@ def extract_dynamic_variables(reference):
 def main():
     print("=" * 70)
     print("ASSESSMENT WORKSPACE - PASO 11")
-    print("CRUCE DE REFERENCIAS DE TABLAS VS INVENTARIO HIVE")
+    print("CRUCE DE REFERENCIAS DE TABLAS VS INVENTARIO HIVE - V2")
     print("=" * 70)
     print()
 
@@ -158,28 +159,30 @@ def main():
         name_format = clean(row.get("name_format"))
         reference_type = clean(row.get("reference_type"))
         jobs = split_jobs(row.get("jobs"))
+        data_source = clean(row.get("data_source")) or "UNKNOWN"
 
         if name_format == "TEMP_VIEW":
             normalized_reference = normalize(table_reference)
             source_kind = "TEMP_VIEW"
-            object_key = f"TEMP_VIEW::{normalized_reference}"
+            object_key = f"{data_source}::TEMP_VIEW::{normalized_reference}"
 
         elif name_format in {"DYNAMIC_VARIABLE", "DYNAMIC_TABLE_EXPRESSION"}:
             normalized_reference = normalize(table_reference)
             source_kind = "DYNAMIC_REFERENCE"
             # Mantener expresión completa; no colapsar distintas expresiones
             # dinámicas que reutilicen la misma variable.
-            object_key = f"DYNAMIC::{normalized_reference}"
+            object_key = f"{data_source}::DYNAMIC::{normalized_reference}"
 
         else:
             normalized_reference = normalize_hive_reference(table_reference)
             source_kind = "PHYSICAL_REFERENCE"
-            object_key = f"PHYSICAL::{normalized_reference}"
+            object_key = f"{data_source}::PHYSICAL::{normalized_reference}"
 
         if object_key not in ref_groups:
             ref_groups[object_key] = {
                 "object_key": object_key,
                 "source_kind": source_kind,
+                "data_source": data_source,
                 "table_reference": table_reference,
                 "normalized_reference": normalized_reference,
                 "name_format": name_format,
@@ -229,15 +232,36 @@ def main():
         physical_status = ""
         notes = ""
 
-        if source_kind == "TEMP_VIEW":
+        data_source = group["data_source"]
+
+        # --------------------------------------------------------
+        # Primero se decide el motor/origen de datos.
+        # JDBC es una dependencia externa al Hive Metastore y NO
+        # debe compararse contra las 207 tablas físicas Hive.
+        # --------------------------------------------------------
+        if data_source == "JDBC":
+            reconciliation_status = "OUT_OF_SCOPE_JDBC"
+            notes = (
+                "Referencia de tabla utilizada mediante JDBC. Se conserva como "
+                "dependencia externa del job, pero queda fuera del cruce HMS -> UC."
+            )
+
+        elif data_source == "UNKNOWN":
+            reconciliation_status = "DATA_SOURCE_UNKNOWN_REQUIRES_REVIEW"
+            notes = (
+                "Se detectó una referencia de tabla, pero el Paso 08 no pudo "
+                "determinar de forma segura si pertenece a Spark/Hive o JDBC."
+            )
+
+        elif source_kind == "TEMP_VIEW":
             reconciliation_status = "TEMP_VIEW_NO_HIVE_LOOKUP"
-            notes = "Vista temporal; no requiere existencia como tabla física Hive."
+            notes = "Vista temporal Spark; no requiere existencia como tabla física Hive."
 
         elif source_kind == "DYNAMIC_REFERENCE":
             reconciliation_status = "DYNAMIC_PENDING_TRACE"
             notes = (
-                "Referencia dinámica. Paso 09 identifica su origen, pero el valor "
-                "físico final se resolverá en la trazabilidad/configuración."
+                "Referencia dinámica Spark/Hive. Paso 09 identifica su origen, "
+                "pero el valor físico final se resolverá en la trazabilidad/configuración."
             )
 
         else:
@@ -247,8 +271,8 @@ def main():
                 reconciliation_status = "UNQUALIFIED_REFERENCE_REQUIRES_REVIEW"
                 table = parts[0]
                 notes = (
-                    "Referencia de una sola parte. No se hace matching por basename "
-                    "para evitar falsos positivos."
+                    "Referencia Spark/Hive de una sola parte. No se hace matching "
+                    "por basename para evitar falsos positivos."
                 )
 
             elif len(parts) == 2:
@@ -257,7 +281,11 @@ def main():
 
                 if hive_row is None:
                     reconciliation_status = "REFERENCED_NOT_FOUND"
-                    notes = "Referencia literal no encontrada por match exacto schema.tabla."
+                    notes = (
+                        "Referencia literal Spark/Hive no encontrada por match exacto "
+                        "schema.tabla en el snapshot de Hive Metastore."
+                    )
+
                 else:
                     physical_keys_used.add(normalized_reference)
                     physical_exists = "true"
@@ -275,11 +303,12 @@ def main():
 
             else:
                 reconciliation_status = "UNSUPPORTED_NAME_FORMAT_REQUIRES_REVIEW"
-                notes = "Formato de nombre no soportado por el cruce Hive estricto."
+                notes = "Formato de nombre Spark/Hive no soportado por el cruce estricto."
 
         output_rows.append({
             "object_key": group["object_key"],
             "source_kind": source_kind,
+            "data_source": group["data_source"],
             "table_reference": group["table_reference"],
             "normalized_reference": normalized_reference,
             "schema": schema,
@@ -332,6 +361,7 @@ def main():
         output_rows.append({
             "object_key": f"PHYSICAL::{hive_key}",
             "source_kind": "PHYSICAL_INVENTORY",
+            "data_source": "SPARK_HIVE",
             "table_reference": clean(hive_row.get("full_name")),
             "normalized_reference": hive_key,
             "schema": schema,
@@ -375,6 +405,7 @@ def main():
         1
         for row in output_rows
         if row["source_kind"] == "PHYSICAL_REFERENCE"
+        and row["data_source"] == "SPARK_HIVE"
         and row["physical_exists"] == "true"
     )
 
@@ -384,15 +415,31 @@ def main():
         if row["reconciliation_status"] == "REFERENCED_NOT_FOUND"
     )
 
+    jdbc_objects = sum(
+        1
+        for row in output_rows
+        if row["reconciliation_status"] == "OUT_OF_SCOPE_JDBC"
+    )
+
+    source_counts = Counter(
+        clean(row.get("data_source")) or "UNKNOWN"
+        for row in refs
+    )
+
     print("--- Entradas ---")
     print(f"Referencias de código         : {len(refs)}")
     print(f"Orígenes dinámicos            : {len(dynamic_sources)}")
     print(f"Tablas físicas Hive           : {len(hive_rows)}")
     print()
+    print("Referencias por origen:")
+    for data_source in sorted(source_counts):
+        print(f" - {data_source:<20}: {source_counts[data_source]}")
+    print()
     print("--- Reconciliación ---")
     print(f"Objetos consolidados          : {len(output_rows)}")
     print(f"Tablas físicas usadas         : {physical_used}")
     print(f"Referencias no encontradas    : {referenced_not_found}")
+    print(f"Objetos JDBC fuera de alcance : {jdbc_objects}")
     print()
     print("Resumen por estado:")
     for status in sorted(status_counts):

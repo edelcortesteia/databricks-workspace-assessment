@@ -112,7 +112,7 @@ def remove_comments(code):
 def main():
     print("=" * 70)
     print("ASSESSMENT WORKSPACE - PASO 09")
-    print("ORIGEN DE VARIABLES DINAMICAS DE TABLAS")
+    print("ORIGEN DE VARIABLES DINAMICAS DE TABLAS - V4")
     print("=" * 70)
     print()
 
@@ -142,14 +142,29 @@ def main():
         if nb and job:
             notebook_jobs[nb].add(job)
 
+    # Variable dinámica -> origen técnico de la referencia detectada en Paso 08.
+    # Conservamos JDBC / SPARK_HIVE para no tener que redescubrirlo después.
     dynamic_variables = defaultdict(set)
+    variable_data_sources = defaultdict(set)
+
     for r in table_refs:
         if (r.get("name_format") or "").strip() not in {"DYNAMIC_VARIABLE", "DYNAMIC_TABLE_EXPRESSION"}:
             continue
+
         nb = (r.get("notebook") or "").strip()
         ref = (r.get("table_reference") or "").strip()
+        data_source = (r.get("data_source") or "").strip() or "UNKNOWN"
+
         for variable in re.findall(r"\$\{([A-Za-z_]\w*)\}", ref):
             dynamic_variables[nb].add(variable)
+            variable_data_sources[(nb, variable)].add(data_source)
+
+    def data_source_for(notebook, variable):
+        values = sorted(
+            variable_data_sources.get((notebook, variable), {"UNKNOWN"}),
+            key=str.casefold
+        )
+        return " | ".join(values)
 
     rows = []
     missing_files = []
@@ -185,6 +200,7 @@ def main():
                     "source_type": "DIRECT_ASSIGNMENT",
                     "source_expression": expression,
                     "jobs": " | ".join(sorted(notebook_jobs.get(notebook, set()), key=str.casefold)),
+                    "data_source": data_source_for(notebook, variable),
                 })
 
             for match in FUNCTION_PARAMETER_PATTERN.finditer(code):
@@ -199,6 +215,7 @@ def main():
                             "source_type": "FUNCTION_PARAMETER",
                             "source_expression": f"parameter of {function_name}",
                             "jobs": " | ".join(sorted(notebook_jobs.get(notebook, set()), key=str.casefold)),
+                            "data_source": data_source_for(notebook, variable),
                         })
 
             for match in ITERATOR_PATTERN.finditer(code):
@@ -212,6 +229,7 @@ def main():
                     "source_type": "ITERATOR_VARIABLE",
                     "source_expression": f"{collection_name}.{operation}({iterator_variable} => ...)",
                     "jobs": " | ".join(sorted(notebook_jobs.get(notebook, set()), key=str.casefold)),
+                    "data_source": data_source_for(notebook, iterator_variable),
                 })
 
     if missing_files:
@@ -221,7 +239,13 @@ def main():
     unique_rows, seen = [], set()
     duplicates = 0
     for r in rows:
-        key = (r["notebook"], r["variable"], r["source_type"], r["source_expression"])
+        key = (
+            r["notebook"],
+            r["variable"],
+            r["source_type"],
+            r["source_expression"],
+            r["data_source"],
+        )
         if key in seen:
             duplicates += 1
             continue
@@ -232,7 +256,15 @@ def main():
     rows.sort(key=lambda r: (r["notebook"].casefold(), r["variable"].casefold(), int(r["cell"])))
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["notebook", "cell", "variable", "source_type", "source_expression", "jobs"]
+    fieldnames = [
+        "notebook",
+        "cell",
+        "variable",
+        "source_type",
+        "source_expression",
+        "jobs",
+        "data_source",
+    ]
     with OUTPUT_FILE.open("w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -243,6 +275,11 @@ def main():
     unresolved_pairs = sorted(used_pairs - resolved_pairs, key=lambda x: (x[0].casefold(), x[1].casefold()))
     unique_names = {var for _, var in used_pairs}
     counts = Counter(r["source_type"] for r in rows)
+    data_source_counts = Counter(r["data_source"] for r in rows)
+    variable_source_counts = Counter(
+        " | ".join(sorted(values, key=str.casefold))
+        for values in variable_data_sources.values()
+    )
 
     print("--- Alcance ---")
     print(f"Notebooks con variables dinamicas : {len(dynamic_variables)}")
@@ -257,6 +294,25 @@ def main():
     print(f"Usos sin origen identificado      : {len(unresolved_pairs)}")
     print(f"Duplicados omitidos               : {duplicates}")
     print()
+    print("Resumen por origen de datos de la variable:")
+    for data_source, count in sorted(data_source_counts.items()):
+        print(f" - {data_source:<24}: {count}")
+    print()
+
+    mixed_pairs = [
+        (nb, var, " | ".join(sorted(values, key=str.casefold)))
+        for (nb, var), values in variable_data_sources.items()
+        if len(values) > 1
+    ]
+    print(f"Variables con más de un data_source : {len(mixed_pairs)}")
+    if mixed_pairs:
+        for nb, var, sources in sorted(
+            mixed_pairs,
+            key=lambda x: (x[0].casefold(), x[1].casefold())
+        )[:20]:
+            print(f" - {nb} | {var} | {sources}")
+    print()
+
     print("Resumen por tipo de origen:")
     for source_type in sorted(counts):
         print(f" - {source_type:<22}: {counts[source_type]}")
