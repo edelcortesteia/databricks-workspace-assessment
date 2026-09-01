@@ -1,5 +1,6 @@
 # Inputs grandes / snapshots
 input/*.zip
+input/config/*.json
 snapshot/
 
 # Outputs generados
