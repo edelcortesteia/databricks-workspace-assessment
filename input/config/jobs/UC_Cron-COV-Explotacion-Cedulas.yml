@@ -1,0 +1,58 @@
+resources:
+  jobs:
+    Cron_COV_Explotacion_Cedulas:
+      name: Cron-COV-Explotacion-Cedulas
+      email_notifications:
+        on_failure:
+          - edel.cortes@teia.mx
+      timeout_seconds: 3600
+      health:
+        rules:
+          - metric: RUN_DURATION_SECONDS
+            op: GREATER_THAN
+            value: 1800
+      schedule:
+        quartz_cron_expression: 27 30 * * * ?
+        timezone_id: America/Mexico_City
+        pause_status: PAUSED
+      tasks:
+        - task_key: COV-Explotacion-Cedulas
+          notebook_task:
+            notebook_path: /Workspace/Shared/CoVol_UC/CoVol40/Notebooks/Oro/Cedulas/Ejecutor_Cedulas
+            source: WORKSPACE
+          job_cluster_key: Job_Cedulas_cluster
+          libraries:            
+            - maven:
+                coordinates: org.scalaj:scalaj-http_2.12:2.4.2
+            - maven:
+                coordinates: com.azure:azure-storage-blob:12.24.1
+            - maven:
+                coordinates: com.github.jsurfer:jsurfer-gson:1.6.4
+            - maven:
+                coordinates: com.microsoft.azure:applicationinsights-core:2.6.4
+            - jar: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/parser_2.12-0.2.jar
+      job_clusters:
+        - job_cluster_key: Job_Cedulas_cluster
+          new_cluster:
+            spark_version: 16.4.x-scala2.12
+            spark_conf:
+              spark.databricks.io.cache.enabled: "true"
+              spark.databricks.adaptive.autoOptimizeShuffle.enabled: "true"
+            azure_attributes:
+              first_on_demand: 1
+              availability: ON_DEMAND_AZURE
+              spot_bid_max_price: -1
+            node_type_id: Standard_DS3_v2
+            custom_tags:
+              CoVolProcesoNombre: Explotacion-Cedulas
+            spark_env_vars:
+              PYSPARK_PYTHON: /databricks/python3/bin/python3
+              CV_EXPLOTACION_CONFIG_FILE_PATH: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/0.0_Configuration.json
+            enable_elastic_disk: true
+            data_security_mode: SINGLE_USER
+            runtime_engine: STANDARD
+            num_workers: 2
+      queue:
+        enabled: true
+      run_as:
+        service_principal_name: 33519ef1-6a84-4748-94a9-13ef2daeb9c6

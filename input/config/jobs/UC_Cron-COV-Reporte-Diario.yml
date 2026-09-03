@@ -1,0 +1,58 @@
+resources:
+  jobs:
+    Cron_COV_Reporte_Diario:
+      name: "Cron-COV-Reporte-Diario"
+      
+      schedule:
+        quartz_cron_expression: "46 5 10 * * ?"
+        timezone_id: "America/Mexico_City"
+        pause_status: "PAUSED"
+
+      tasks:
+        - task_key: "Reporte-Diario"
+          job_cluster_key: "uc_cluster_volumetricos"
+          
+          notebook_task:
+            notebook_path: "/Workspace/Shared/CoVol_UC/Oro/ReporteComp_SP_Ejec_AnioMes"
+            source: WORKSPACE
+
+          max_retries: 2
+          min_retry_interval_millis: 900000
+
+          libraries:            
+            - jar: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/parser_2.12-0.2.jar
+          email_notifications:
+            on_failure:
+              - edel.cortes@teia.mx
+              
+      job_clusters:
+        - job_cluster_key: "uc_cluster_volumetricos"
+          new_cluster:
+            spark_version: "16.4.x-scala2.12"
+            node_type_id: "Standard_D32ds_v5"
+            driver_node_type_id: "Standard_D32ds_v5"
+            num_workers: 8
+            data_security_mode: "SINGLE_USER"
+            runtime_engine: "STANDARD"
+            enable_elastic_disk: true
+            azure_attributes:
+              first_on_demand: 1
+              availability: "ON_DEMAND_AZURE"
+              spot_bid_max_price: -1
+            spark_conf:
+              spark.databricks.delta.preview.enabled: "true"
+              spark.databricks.io.cache.maxMetaDataCache: "8g"
+              spark.databricks.adaptive.autoOptimizeShuffle.enabled: "true"
+              spark.databricks.adaptive.skewJoin.spillProof.enabled: "true"
+            custom_tags:
+              CoVolProcesoNombre: Explotacion-Reporte-Diario
+            spark_env_vars:              
+              PYSPARK_PYTHON: /databricks/python3/bin/python3
+              CV_EXPLOTACION_CONFIG_FILE_PATH: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/0.0_Configuration.json
+            
+     
+      timeout_seconds: 3600
+      max_concurrent_runs: 1
+
+      run_as:
+        service_principal_name: 33519ef1-6a84-4748-94a9-13ef2daeb9c6

@@ -1,0 +1,56 @@
+resources:
+  jobs:
+    Cron_COV_Explotacion_Cfdi_Delta:
+      name: Cron-COV-Explotacion-Cfdi-Delta
+      email_notifications:
+        on_failure:
+          - edel.cortes@teia.mx
+      schedule:
+        quartz_cron_expression: 40 0 9 ? * Mon
+        timezone_id: America/Mexico_City
+        pause_status: PAUSED
+      tasks:
+        - task_key: COV-Explotacion-Cfdi-Delta
+          notebook_task:
+            notebook_path: /Workspace/Shared/CoVol_UC/ControlesVolumetricos4.0/Notebooks/Oro/Cedulas/Coordinador_DeltasCfdi
+            base_parameters:
+              fechaInicial: ""
+              fechaFinal: ""
+            source: WORKSPACE
+          job_cluster_key: COV-Explotacion-Cfdi-Delta_cluster
+          libraries:
+            - maven:
+                coordinates: com.microsoft.azure:applicationinsights-core:2.6.4
+            - maven:
+                coordinates: com.azure:azure-storage-blob:12.24.1
+            - jar: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/parser_2.12-0.2.jar
+      job_clusters:
+        - job_cluster_key: COV-Explotacion-Cfdi-Delta_cluster
+          new_cluster:
+            spark_version: 16.4.x-scala2.12
+            spark_conf:
+              spark.databricks.io.cache.enabled: "true"
+              spark.databricks.io.cache.maxDiskUsage: 80g
+              spark.databricks.io.cache.maxMetaDataCache: 5g
+              spark.databricks.adaptive.skewJoin.spillProof.enabled: "true"
+              spark.databricks.adaptive.autoOptimizeShuffle.minPartitionNumber: "10000"
+              spark.databricks.adaptive.autoOptimizeShuffle.enabled: "true"
+            azure_attributes:
+              first_on_demand: 1
+              availability: ON_DEMAND_AZURE
+              spot_bid_max_price: -1
+            node_type_id: Standard_D32ds_v5
+            driver_node_type_id: Standard_D16ds_v5
+            custom_tags:
+              CoVolProcesoNombre: Explotacion-Cfdi-Delta
+            spark_env_vars:
+              PYSPARK_PYTHON: /databricks/python3/bin/python3
+              CV_EXPLOTACION_CONFIG_FILE_PATH: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/0.0_Configuration.json
+            enable_elastic_disk: true
+            data_security_mode: SINGLE_USER
+            runtime_engine: STANDARD
+            num_workers: 5
+      queue:
+        enabled: true
+      run_as:
+        service_principal_name: 33519ef1-6a84-4748-94a9-13ef2daeb9c6

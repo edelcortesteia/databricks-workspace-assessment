@@ -1,0 +1,46 @@
+resources:
+  jobs:
+    Streams_COV_Metadata_Write:
+      name: Streams-COV-Metadata-Write
+      email_notifications:
+        on_failure:
+          - edel.cortes@teia.mx
+      tasks:
+        - task_key: COV-Stream-Metadata-Write
+          notebook_task:
+            notebook_path: /Workspace/Shared/CoVol_UC/SpeedLayer/GenerarMetadata
+            source: WORKSPACE
+          job_cluster_key: COV-Stream-Metadata-Write_cluster
+          libraries:
+            - maven:
+                coordinates: com.microsoft.azure:applicationinsights-core:2.6.4
+            - maven:
+                coordinates: com.github.jsurfer:jsurfer-gson:1.6.4
+            - maven:
+                coordinates: com.azure:azure-storage-blob:12.24.1
+            - jar: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/parser_2.12-0.2.jar
+          max_retries: 3
+          min_retry_interval_millis: 900000
+      job_clusters:
+        - job_cluster_key: COV-Stream-Metadata-Write_cluster
+          new_cluster:
+            cluster_name: ""
+            spark_version: 16.4.x-scala2.12
+            azure_attributes:
+              first_on_demand: 1
+              availability: ON_DEMAND_AZURE
+              spot_bid_max_price: -1
+            node_type_id: Standard_DS3_v2
+            custom_tags:
+              CoVolProcesoNombre: Stream-Metadata-Write
+            spark_env_vars:
+              PYSPARK_PYTHON: /databricks/python3/bin/python3
+              CV_EXPLOTACION_CONFIG_FILE_PATH: /Volumes/u_impin_convol/cv_bronce_recepcion/vol_convol_001/0.0_Configuration.json
+            enable_elastic_disk: true
+            data_security_mode: SINGLE_USER
+            runtime_engine: STANDARD
+            num_workers: 1
+      queue:
+        enabled: true
+      run_as:
+        service_principal_name: 33519ef1-6a84-4748-94a9-13ef2daeb9c6
