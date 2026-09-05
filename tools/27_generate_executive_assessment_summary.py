@@ -18,8 +18,10 @@ import json
 #   output/assessment_executive_summary.csv
 #   output/assessment_executive_summary.json
 #
-# Ajustes V2:
+# Ajustes V3:
 #   - Paso 19 usa migration_ready = YES / NO.
+#   - Paso 14 V5.1 aporta existencia física real en UC y acciones
+#     REGISTER_OR_MIGRATE_TO_UC / CREATE_VIEW_IN_UC.
 #   - Paso 20 usa job_readiness = READY /
 #     REQUIRES_IMPLEMENTATION / REVIEW_REQUIRED.
 #   - Las revisiones de librerías se contabilizan sólo para
@@ -459,9 +461,76 @@ def main():
                 row.get(
                     "mapping_status"
                 )
+                or row.get(
+                    "fuente_mapeo"
+                )
             )
             == "no_uc_mapping"
         )
+    )
+
+    # Paso 14 V5.1: estado físico real de objetos funcionales en UC.
+    used_uc_found = sum(
+        1
+        for row in table_rows
+        if (
+            table_is_used(row)
+            and clean(
+                row.get(
+                    "reconciliation_status"
+                )
+            )
+            == "EXISTS_AND_USED_UC_FOUND"
+        )
+    )
+
+    used_uc_missing_tables = sum(
+        1
+        for row in table_rows
+        if (
+            table_is_used(row)
+            and (
+                clean(
+                    row.get(
+                        "reconciliation_status"
+                    )
+                )
+                == "EXISTS_AND_USED_UC_NOT_FOUND"
+                or clean(
+                    row.get(
+                        "migration_action"
+                    )
+                )
+                == "REGISTER_OR_MIGRATE_TO_UC"
+            )
+        )
+    )
+
+    used_uc_missing_views = sum(
+        1
+        for row in table_rows
+        if (
+            table_is_used(row)
+            and (
+                clean(
+                    row.get(
+                        "reconciliation_status"
+                    )
+                )
+                == "USED_VIEW_UC_NOT_FOUND"
+                or clean(
+                    row.get(
+                        "migration_action"
+                    )
+                )
+                == "CREATE_VIEW_IN_UC"
+            )
+        )
+    )
+
+    used_uc_missing_total = (
+        used_uc_missing_tables
+        + used_uc_missing_views
     )
 
     add_metric(
@@ -486,6 +555,72 @@ def main():
             else "ATTENTION"
         ),
         "table_hive_reconciliation_final.csv",
+    )
+
+    add_metric(
+        metrics,
+        "DATOS",
+        "Objetos funcionales encontrados en UC",
+        used_uc_found,
+        (
+            "OK"
+            if used_uc_missing_total == 0
+            else "ATTENTION"
+        ),
+        "table_hive_reconciliation_final.csv",
+        (
+            "Objetos usados por notebooks funcionales cuyo destino "
+            "UC fue encontrado físicamente en el inventario del workspace."
+        ),
+    )
+
+    add_metric(
+        metrics,
+        "DATOS",
+        "Objetos funcionales ausentes en UC",
+        used_uc_missing_total,
+        (
+            "ATTENTION"
+            if used_uc_missing_total
+            else "OK"
+        ),
+        "table_hive_reconciliation_final.csv",
+        (
+            "Incluye tablas externas pendientes de registro/migración "
+            "y vistas persistentes pendientes de recreación."
+        ),
+    )
+
+    add_metric(
+        metrics,
+        "DATOS",
+        "Tablas externas ausentes en UC",
+        used_uc_missing_tables,
+        (
+            "ATTENTION"
+            if used_uc_missing_tables
+            else "OK"
+        ),
+        "table_hive_reconciliation_final.csv",
+        (
+            "Acción esperada: REGISTER_OR_MIGRATE_TO_UC."
+        ),
+    )
+
+    add_metric(
+        metrics,
+        "DATOS",
+        "Views persistentes ausentes en UC",
+        used_uc_missing_views,
+        (
+            "ATTENTION"
+            if used_uc_missing_views
+            else "OK"
+        ),
+        "table_hive_reconciliation_final.csv",
+        (
+            "Acción esperada: CREATE_VIEW_IN_UC."
+        ),
     )
 
     add_metric(
@@ -1405,6 +1540,21 @@ def main():
         "implementation_actions_pending":
             implementation_actions,
 
+        "functional_objects_used":
+            used_tables,
+
+        "functional_objects_found_in_uc":
+            used_uc_found,
+
+        "functional_objects_missing_in_uc":
+            used_uc_missing_total,
+
+        "external_tables_missing_in_uc":
+            used_uc_missing_tables,
+
+        "persistent_views_missing_in_uc":
+            used_uc_missing_views,
+
         "metrics":
             metrics,
 
@@ -1474,6 +1624,22 @@ def main():
     print(
         f"Tablas Hive utilizadas           : "
         f"{used_tables}"
+    )
+    print(
+        f"Objetos funcionales en UC        : "
+        f"{used_uc_found}"
+    )
+    print(
+        f"Objetos funcionales ausentes UC  : "
+        f"{used_uc_missing_total}"
+    )
+    print(
+        f" - Tablas externas ausentes      : "
+        f"{used_uc_missing_tables}"
+    )
+    print(
+        f" - Views persistentes ausentes   : "
+        f"{used_uc_missing_views}"
     )
     print(
         f"Dependencias JDBC externas       : "

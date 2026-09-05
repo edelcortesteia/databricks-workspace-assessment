@@ -1,1126 +1,266 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
-from collections import defaultdict, Counter
-import csv
+import pandas as pd
 
 
-# ============================================================
-# Assessment Workspace - Paso 21
-# Backlog Maestro de Acciones de Migración
-#
-# Base lógica: Tool 1 / Paso 20
-#   tools/20_generate_master_migration_actions.py
-#
-# Adaptación Tool 2:
-#   - usa snapshot Workspace como fuente autoritativa;
-#   - consume Paso 19 y Paso 20 actuales;
-#   - usa Paso 18 para working tables dinámicas;
-#   - usa Paso 15 para storage;
-#   - integra revisiones manuales si existieran;
-#   - evita duplicar una misma acción técnica cuando un notebook
-#     impacta varios jobs.
-# ============================================================
-
-
-NOTEBOOK_BACKLOG_FILE = Path(
-    "output/notebook_migration_backlog.csv"
-)
-
-JOB_READINESS_FILE = Path(
-    "output/job_migration_readiness.csv"
-)
-
-STORAGE_ANALYSIS_FILE = Path(
-    "output/storage_migration_analysis.csv"
-)
-
-DYNAMIC_WORKING_TABLES_FILE = Path(
-    "output/dynamic_working_tables.csv"
-)
-
-OUTPUT_FILE = Path(
-    "output/master_migration_actions.csv"
-)
-
-
-# ============================================================
-# Utilidades
-# ============================================================
-
-def clean(value):
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def normalize(value):
-    return (
-        clean(value)
-        .replace("\\", "/")
-        .strip()
-        .lower()
-    )
-
-
-def read_csv(path):
-    with path.open(
-        "r",
-        encoding="utf-8-sig",
-        newline="",
-    ) as f:
-        return list(csv.DictReader(f))
-
-
-def split_multi_value(value):
-    value = clean(value)
-
-    if not value:
+def split_pipe(value):
+    if pd.isna(value) or str(value).strip() == "":
         return []
-
-    return [
-        item.strip()
-        for item in value.split("|")
-        if item.strip()
-    ]
+    return [x.strip() for x in str(value).split("|") if x.strip()]
 
 
-def unique(values):
-    result = []
+def uniq_join(values):
+    out = []
     seen = set()
-
     for value in values:
-        value = clean(value)
-
-        if not value:
-            continue
-
-        key = value.casefold()
-
-        if key not in seen:
-            seen.add(key)
-            result.append(value)
-
-    return result
-
-
-def unique_join(values):
-    return " | ".join(
-        unique(values)
-    )
-
-
-# ============================================================
-# Validar entradas
-# ============================================================
-
-required_files = [
-    NOTEBOOK_BACKLOG_FILE,
-    JOB_READINESS_FILE,
-    STORAGE_ANALYSIS_FILE,
-    DYNAMIC_WORKING_TABLES_FILE,
-]
-
-missing_files = [
-    str(path)
-    for path in required_files
-    if not path.exists()
-]
-
-if missing_files:
-    print(
-        "ERROR: faltan archivos requeridos:"
-    )
-
-    for path in missing_files:
-        print(f" - {path}")
-
-    raise SystemExit(1)
-
-
-# ============================================================
-# Cargar
-# ============================================================
-
-notebook_rows = read_csv(
-    NOTEBOOK_BACKLOG_FILE
-)
-
-job_rows = read_csv(
-    JOB_READINESS_FILE
-)
-
-storage_rows = read_csv(
-    STORAGE_ANALYSIS_FILE
-)
-
-dynamic_rows = read_csv(
-    DYNAMIC_WORKING_TABLES_FILE
-)
-
-
-# ============================================================
-# Índices notebook -> jobs
-# ============================================================
-
-notebook_to_jobs = defaultdict(
-    set
-)
-
-for row in notebook_rows:
-    notebook = clean(
-        row.get("notebook")
-    )
-
-    if not notebook:
-        continue
-
-    for job in split_multi_value(
-        row.get("job")
-    ):
-        notebook_to_jobs[
-            notebook
-        ].add(job)
-
-
-# ============================================================
-# Acumulador maestro
-# ============================================================
-
-actions = {}
-
-
-def get_action(
-    action_key,
-    action_type,
-    title,
-):
-    if action_key not in actions:
-        actions[
-            action_key
-        ] = {
-            "action_type":
-                action_type,
-
-            "title":
-                title,
-
-            "description":
-                "",
-
-            "affected_notebooks":
-                set(),
-
-            "affected_jobs":
-                set(),
-
-            "config_change":
-                "",
-
-            "code_change":
-                "",
-
-            "target_value":
-                "",
-
-            "priority":
-                "",
-
-            "status":
-                "PENDING_IMPLEMENTATION",
-
-            "source_steps":
-                set(),
-
-            "notes":
-                set(),
-        }
-
-    return actions[
-        action_key
-    ]
-
-
-def add_notebook_and_jobs(
-    action,
-    notebook,
-):
-    notebook = clean(
-        notebook
-    )
-
-    if not notebook:
-        return
-
-    action[
-        "affected_notebooks"
-    ].add(
-        notebook
-    )
-
-    for job in notebook_to_jobs.get(
-        notebook,
-        []
-    ):
-        action[
-            "affected_jobs"
-        ].add(
-            job
-        )
-
-
-# ============================================================
-# ACCIÓN 1 - Schema dinámico cv_work
-#
-# Consolida los 3 notebooks del Paso 18 en UNA sola acción de
-# arquitectura/configuración porque el cambio técnico es común:
-#
-#   EsquemasTrabajoDbks_UC.Default
-#       -> u_impin_convol.cv_work
-#
-# La modificación de código se aplica en cada notebook afectado,
-# pero el backlog maestro no duplica la decisión técnica.
-# ============================================================
-
-for row in dynamic_rows:
-    if (
-        clean(
-            row.get("requires_action")
-        )
-        != "YES"
-    ):
-        continue
-
-    notebook = clean(
-        row.get("notebook")
-    )
-
-    config_path = clean(
-        row.get("config_path")
-    )
-
-    configured_schema = clean(
-        row.get(
-            "configured_work_schema"
-        )
-    )
-
-    target_schema = (
-        configured_schema
-        or "u_impin_convol.cv_work"
-    )
-
-    action_key = (
-        "DYNAMIC_WORK_SCHEMA::"
-        + normalize(
-            config_path
-            or "EsquemasTrabajoDbks_UC.Default"
-        )
-    )
-
-    action = get_action(
-        action_key,
-        "WORK_SCHEMA",
-        "Configurar schema dinámico de trabajo cv_work",
-    )
-
-    action[
-        "description"
-    ] = (
-        "Sustituir el uso dinámico del esquema legacy "
-        "default por un schema de trabajo gobernado por "
-        "Unity Catalog."
-    )
-
-    action[
-        "config_change"
-    ] = (
-        "Agregar/usar "
-        "EsquemasTrabajoDbks_UC.Default"
-    )
-
-    action[
-        "code_change"
-    ] = (
-        "Construir las tablas dinámicas usando "
-        "EsquemasTrabajoDbks_UC.Default en lugar de "
-        "default.${nombreTablaSinBaseDeDatos}."
-    )
-
-    action[
-        "target_value"
-    ] = target_schema
-
-    action[
-        "priority"
-    ] = "HIGH"
-
-    action[
-        "source_steps"
-    ].update(
-        {
-            "STEP_18",
-            "STEP_19",
-            "STEP_20",
-        }
-    )
-
-    add_notebook_and_jobs(
-        action,
-        notebook,
-    )
-
-
-# ============================================================
-# ACCIONES - Storage
-# ============================================================
-
-for row in storage_rows:
-    if (
-        clean(
-            row.get("requires_action")
-        )
-        != "YES"
-    ):
-        continue
-
-    notebook = clean(
-        row.get("notebook")
-    )
-
-    migration_status = clean(
-        row.get("migration_status")
-    )
-
-    config_path = clean(
-        row.get("config_path")
-    )
-
-    # --------------------------------------------------------
-    # Cedulas - completar ABFSS
-    # --------------------------------------------------------
-
-    if (
-        migration_status
-        == "CONFIG_ABFSS_URI_REQUIRED"
-    ):
-        action_key = (
-            "STORAGE_ABFSS::"
-            + normalize(
-                config_path
-            )
-        )
-
-        action = get_action(
-            action_key,
-            "STORAGE",
+        for item in split_pipe(value):
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+    return " | ".join(out)
+
+
+def make_action(action_key, change_type, title, description, rows,
+                config_change, code_change, target_value,
+                priority="HIGH", status="PENDING_IMPLEMENTATION",
+                source_steps="STEP_15 | STEP_19 | STEP_20", notes=""):
+    notebooks = uniq_join(rows.get("notebook", pd.Series(dtype=str)).tolist())
+    jobs = uniq_join(rows.get("jobs", rows.get("job", pd.Series(dtype=str))).tolist())
+    return {
+        "action_key": action_key,
+        "change_type": change_type,
+        "title": title,
+        "description": description,
+        "affected_notebooks": notebooks,
+        "affected_notebook_count": len(split_pipe(notebooks)),
+        "affected_jobs": jobs,
+        "affected_job_count": len(split_pipe(jobs)),
+        "config_change": config_change,
+        "code_change": code_change,
+        "target_value": target_value,
+        "priority": priority,
+        "status": status,
+        "source_steps": source_steps,
+        "notes": notes,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate consolidated master migration actions")
+    parser.add_argument("--output-dir", default="output")
+    args = parser.parse_args()
+
+    out = Path(args.output_dir)
+    storage_path = out / "storage_migration_analysis.csv"
+    work_path = out / "dynamic_working_tables.csv"
+    backlog_path = out / "notebook_migration_backlog.csv"
+    readiness_path = out / "job_migration_readiness.csv"
+    table_path = out / "table_hive_reconciliation_final.csv"
+    output_path = out / "master_migration_actions.csv"
+
+    missing = [p for p in [storage_path, work_path, backlog_path, readiness_path, table_path] if not p.exists()]
+    if missing:
+        raise FileNotFoundError("Missing required inputs: " + ", ".join(str(p) for p in missing))
+
+    storage = pd.read_csv(storage_path)
+    working = pd.read_csv(work_path)
+    backlog = pd.read_csv(backlog_path)
+    readiness = pd.read_csv(readiness_path)
+    tables = pd.read_csv(table_path)
+
+    actions = []
+
+    # ACT: Cedulas DBFS -> ABFSS
+    s = storage[(storage["requires_action"].astype(str).str.upper() == "YES") &
+                (storage["migration_status"] == "CONFIG_ABFSS_URI_REQUIRED")]
+    if not s.empty:
+        config_path = s["config_path"].dropna().astype(str).iloc[0] if s["config_path"].notna().any() else "Cedulas.MountContenedorCedulas"
+        target = s["uc_value"].dropna().astype(str).iloc[0] if s["uc_value"].notna().any() else "URI abfss:// completa"
+        if target and not target.startswith("abfss://"):
+            target = "abfss://cedulas-recepcion@cu1uatstaucimpinconvolln.dfs.core.windows.net"
+        actions.append(make_action(
+            f"STORAGE_ABFSS::{config_path.lower()}", "STORAGE",
             "Migrar ruta Cedulas de DBFS a ABFSS",
-        )
+            "La ruta de Cedulas debe dejar de construirse mediante dbfs:/ y pasar a utilizar una URI ABFSS completa.",
+            s,
+            f"Actualizar {config_path} con URI abfss:// completa.",
+            "Eliminar el prefijo dbfs:/ del notebook y consumir directamente el valor configurado.",
+            target,
+        ))
 
-        action[
-            "description"
-        ] = (
-            "La ruta de Cedulas debe dejar de construirse "
-            "mediante dbfs:/ y pasar a utilizar una URI "
-            "ABFSS completa."
-        )
-
-        action[
-            "config_change"
-        ] = (
-            f"Actualizar {config_path} con URI "
-            f"abfss:// completa."
-        )
-
-        action[
-            "code_change"
-        ] = (
-            "Eliminar el prefijo dbfs:/ del notebook y "
-            "consumir directamente el valor configurado."
-        )
-
-        uc_value = clean(
-            row.get("uc_value")
-        )
-
-        if (
-            uc_value
-            and "@" in uc_value
-        ):
-            target = (
-                uc_value
-                .lstrip("/")
-            )
-
-            if not target.lower().startswith(
-                "abfss://"
-            ):
-                target = (
-                    "abfss://"
-                    + target
-                )
-
-            action[
-                "target_value"
-            ] = target
-
-        action[
-            "priority"
-        ] = "HIGH"
-
-        action[
-            "source_steps"
-        ].update(
-            {
-                "STEP_15",
-                "STEP_19",
-                "STEP_20",
-            }
-        )
-
-        add_notebook_and_jobs(
-            action,
-            notebook,
-        )
-
-    # --------------------------------------------------------
-    # Config path - variable de entorno
-    # --------------------------------------------------------
-
-    elif (
-        migration_status
-        == "ENV_CONFIG_PATH_REQUIRED"
-    ):
-        action_key = (
-            "ENV_CONFIG_PATH::"
-            "CV_EXPLOTACION_CONFIG_FILE_PATH"
-        )
-
-        action = get_action(
-            action_key,
-            "CONFIG_PATH",
+    # ACT: hardcoded config file path
+    s = storage[(storage["requires_action"].astype(str).str.upper() == "YES") &
+                (storage["migration_status"] == "ENV_CONFIG_PATH_REQUIRED")]
+    if not s.empty:
+        actions.append(make_action(
+            "ENV_CONFIG_PATH::CV_EXPLOTACION_CONFIG_FILE_PATH", "CONFIG_PATH",
             "Eliminar hardcode del archivo de configuración",
+            "Eliminar la ruta /mnt hardcodeada al archivo 0.0_Configuration.json y utilizar la variable de entorno del job.",
+            s,
+            "Garantizar que el job exponga CV_EXPLOTACION_CONFIG_FILE_PATH.",
+            'Usar sys.env("CV_EXPLOTACION_CONFIG_FILE_PATH").',
+            "CV_EXPLOTACION_CONFIG_FILE_PATH",
+            source_steps="STEP_15 | STEP_16 | STEP_19 | STEP_20",
+        ))
+
+    # ACT: dynamic work schema
+    w = working[(working["requires_action"].astype(str).str.upper() == "YES") &
+                (working["migration_status"] == "SCHEMA_CONFIGURATION_REQUIRED")]
+    if not w.empty:
+        config_path = w["config_path"].dropna().astype(str).iloc[0] if w["config_path"].notna().any() else "EsquemasTrabajoDbks_UC.Default"
+        # Working table file uses 'job', normalize for helper.
+        w2 = w.copy()
+        w2["jobs"] = w2["job"]
+        actions.append(make_action(
+            f"DYNAMIC_WORK_SCHEMA::{config_path.lower()}", "WORK_SCHEMA",
+            "Configurar schema dinámico de trabajo cv_work",
+            "Sustituir el uso dinámico del esquema legacy default por un schema de trabajo gobernado por Unity Catalog.",
+            w2,
+            f"Agregar/usar {config_path}",
+            f"Construir las tablas dinámicas usando {config_path} en lugar de default.${{nombreTablaSinBaseDeDatos}}.",
+            "u_impin_convol.cv_work",
+            source_steps="STEP_18 | STEP_19 | STEP_20",
+        ))
+
+    # NEW ACT: configured ABFSS path but code still assumes dbfs:<mount>
+    s = storage[(storage["requires_action"].astype(str).str.upper() == "YES") &
+                (storage["migration_status"] == "CONFIG_DBFS_PREFIX_INCOMPATIBLE_WITH_ABFSS")]
+    if not s.empty:
+        # Group by config_path so future independent properties become independent master actions.
+        for config_path, grp in s.groupby(s["config_path"].fillna("UNRESOLVED_CONFIG_PATH"), dropna=False):
+            target = grp["uc_value"].dropna().astype(str).iloc[0] if grp["uc_value"].notna().any() else "ABFSS URI configured in UC"
+            occurrences = int(pd.to_numeric(grp.get("occurrences", 0), errors="coerce").fillna(0).sum()) if "occurrences" in grp.columns else 0
+            lines = uniq_join(grp.get("line_numbers", pd.Series(dtype=str)).tolist()) if "line_numbers" in grp.columns else ""
+            note = f"Active occurrences detected: {occurrences}. Scanner line references: {lines}." if occurrences else ""
+            actions.append(make_action(
+                f"STORAGE_DBFS_PREFIX::{str(config_path).lower()}", "STORAGE",
+                "Ajustar extracción de listados para rutas ABFSS",
+                "La configuración UC ya contiene una URI ABFSS válida, pero el código consumidor todavía construye o busca el prefijo legacy dbfs:<mount>. Esto puede impedir derivar correctamente BlobName y BlobPath.",
+                grp,
+                f"Sin cambio requerido en {config_path}; conservar la URI ABFSS configurada en UC.",
+                "Eliminar la dependencia de replaceFirst(dbfs:<mount>). Derivar BlobName como ruta relativa al contenedor/basePath y construir BlobPath explícitamente, preservando la semántica esperada por Parser y controles posteriores.",
+                target,
+                notes=note,
+            ))
+
+
+    # ACT: external/business tables required by functional notebooks but absent in UC
+    t = tables[
+        (tables["usada_en_notebook"].astype(str).str.lower() == "true") &
+        (
+            (tables["migration_action"] == "REGISTER_OR_MIGRATE_TO_UC") |
+            (tables["reconciliation_status"] == "EXISTS_AND_USED_UC_NOT_FOUND")
+        )
+    ].copy()
+
+    if not t.empty:
+        # Normalize columns expected by helper.
+        if "jobs" not in t.columns:
+            t["jobs"] = ""
+        if "notebook" not in t.columns:
+            t["notebook"] = t.get("notebooks", "")
+        else:
+            t["notebook"] = t["notebook"].fillna("")
+            if "notebooks" in t.columns:
+                t.loc[t["notebook"].astype(str).str.strip() == "", "notebook"] = t["notebooks"]
+
+        # helper split_pipe supports pipe-delimited notebook/job lists.
+        locations = uniq_join(t.get("location_pro", pd.Series(dtype=str)).tolist())
+        pro_objects = uniq_join(t.get("tabla_pro", pd.Series(dtype=str)).tolist())
+        uc_objects = uniq_join(t.get("tabla_uc", pd.Series(dtype=str)).tolist())
+
+        notes = (
+            "Objetos PRO: " + pro_objects +
+            ". Locations PRO: " + locations +
+            ". La solicitud de registro/migración debe coordinarse con el equipo responsable de los datos externos."
         )
 
-        action[
-            "description"
-        ] = (
-            "Eliminar la ruta /mnt hardcodeada al archivo "
-            "0.0_Configuration.json y utilizar la variable "
-            "de entorno del job."
+        actions.append(make_action(
+            "DATA_OBJECTS::REGISTER_EXTERNAL_TABLES_UC",
+            "DATA_OBJECTS",
+            "Registrar/migrar tablas externas requeridas en Unity Catalog",
+            "Existen tablas Delta externas utilizadas por notebooks funcionales del assessment que tienen destino UC definido, pero no fueron encontradas en el inventario físico de Unity Catalog.",
+            t,
+            "Mantener/validar los destinos UC de tres partes definidos para las tablas requeridas.",
+            "No se requiere cambio de lógica de lectura una vez que las tablas estén registradas en UC; validar únicamente que los notebooks/configuración consuman el nombre UC correspondiente.",
+            uc_objects,
+            source_steps="STEP_14 | STEP_19 | STEP_20",
+            notes=notes,
+        ))
+
+    # ACT: persistent view used by functional notebooks but absent in UC
+    v = tables[
+        (tables["usada_en_notebook"].astype(str).str.lower() == "true") &
+        (
+            (tables["migration_action"] == "CREATE_VIEW_IN_UC") |
+            (tables["reconciliation_status"] == "USED_VIEW_UC_NOT_FOUND")
         )
+    ].copy()
 
-        action[
-            "config_change"
-        ] = (
-            "Garantizar que el job exponga "
-            "CV_EXPLOTACION_CONFIG_FILE_PATH."
-        )
+    if not v.empty:
+        if "jobs" not in v.columns:
+            v["jobs"] = ""
+        if "notebook" not in v.columns:
+            v["notebook"] = v.get("notebooks", "")
+        else:
+            v["notebook"] = v["notebook"].fillna("")
+            if "notebooks" in v.columns:
+                v.loc[v["notebook"].astype(str).str.strip() == "", "notebook"] = v["notebooks"]
 
-        action[
-            "code_change"
-        ] = (
-            'Usar sys.env("CV_EXPLOTACION_CONFIG_FILE_PATH").'
-        )
+        pro_views = uniq_join(v.get("tabla_pro", pd.Series(dtype=str)).tolist())
+        uc_views = uniq_join(v.get("tabla_uc", pd.Series(dtype=str)).tolist())
+        config_paths = uniq_join(v.get("configuracion_json_uc", pd.Series(dtype=str)).tolist())
 
-        action[
-            "target_value"
-        ] = (
-            "CV_EXPLOTACION_CONFIG_FILE_PATH"
-        )
-
-        action[
-            "priority"
-        ] = "HIGH"
-
-        action[
-            "source_steps"
-        ].update(
-            {
-                "STEP_15",
-                "STEP_16",
-                "STEP_19",
-                "STEP_20",
-            }
-        )
-
-        add_notebook_and_jobs(
-            action,
-            notebook,
-        )
-
-
-# ============================================================
-# ACCIONES - Revisiones manuales
-#
-# En UAT actualmente esperamos 0.
-# Se conserva para que el mismo script funcione en PRO si aparece
-# alguna referencia no resuelta.
-# ============================================================
-
-for row in notebook_rows:
-    manual_reviews = clean(
-        row.get("manual_reviews")
-    )
-
-    secret_reviews = clean(
-        row.get("secret_reviews")
-    )
-
-    notebook = clean(
-        row.get("notebook")
-    )
-
-    if manual_reviews:
-        action_key = (
-            "MANUAL_REVIEW::"
-            + normalize(notebook)
-            + "::"
-            + normalize(manual_reviews)
-        )
-
-        action = get_action(
-            action_key,
-            "MANUAL_REVIEW",
-            "Revisar referencia dinámica no resuelta",
-        )
-
-        action[
-            "description"
-        ] = (
-            "El assessment no logró demostrar completamente "
-            "el valor final de una referencia dinámica."
-        )
-
-        action[
-            "code_change"
-        ] = (
-            "Revisar manualmente la llamada y confirmar "
-            "el objeto real utilizado antes de modificar."
-        )
-
-        action[
-            "priority"
-        ] = "LOW"
-
-        action[
-            "status"
-        ] = "MANUAL_REVIEW_PENDING"
-
-        action[
-            "source_steps"
-        ].update(
-            {
-                "STEP_13",
-                "STEP_19",
-                "STEP_20",
-            }
-        )
-
-        action[
-            "notes"
-        ].add(
-            manual_reviews
-        )
-
-        add_notebook_and_jobs(
-            action,
-            notebook,
-        )
-
-    if secret_reviews:
-        action_key = (
-            "SECRET_REVIEW::"
-            + normalize(notebook)
-            + "::"
-            + normalize(secret_reviews)
-        )
-
-        action = get_action(
-            action_key,
-            "SECRET_REVIEW",
-            "Revisar referencia a Secret Scope/key",
-        )
-
-        action[
-            "description"
-        ] = (
-            "El análisis de secrets no logró resolver "
-            "completamente el scope o key utilizado."
-        )
-
-        action[
-            "code_change"
-        ] = (
-            "Confirmar scope/key real y validar su "
-            "disponibilidad en el workspace destino."
-        )
-
-        action[
-            "priority"
-        ] = "MEDIUM"
-
-        action[
-            "status"
-        ] = "MANUAL_REVIEW_PENDING"
-
-        action[
-            "source_steps"
-        ].update(
-            {
-                "STEP_17",
-                "STEP_19",
-                "STEP_20",
-            }
-        )
-
-        action[
-            "notes"
-        ].add(
-            secret_reviews
-        )
-
-        add_notebook_and_jobs(
-            action,
-            notebook,
-        )
-
-
-# ============================================================
-# Validación de consistencia con readiness
-#
-# Un job REQUIRES_IMPLEMENTATION debe estar cubierto por al
-# menos una acción maestra. Si no, no inferimos la causa:
-# generamos una acción REVIEW para no perder el pendiente.
-# ============================================================
-
-jobs_covered_by_actions = set()
-
-for action in actions.values():
-    jobs_covered_by_actions.update(
-        action[
-            "affected_jobs"
-        ]
-    )
-
-for row in job_rows:
-    if (
-        clean(
-            row.get("job_readiness")
-        )
-        != "REQUIRES_IMPLEMENTATION"
-    ):
-        continue
-
-    job = clean(
-        row.get("job")
-    )
-
-    if not job:
-        continue
-
-    if job in jobs_covered_by_actions:
-        continue
-
-    action_key = (
-        "JOB_READINESS_GAP::"
-        + normalize(job)
-    )
-
-    action = get_action(
-        action_key,
-        "READINESS_REVIEW",
-        f"Revisar pendiente no consolidado del job {job}",
-    )
-
-    action[
-        "description"
-    ] = (
-        "El job figura como REQUIRES_IMPLEMENTATION en "
-        "Paso 20 pero ninguno de sus pendientes quedó "
-        "cubierto por una acción maestra conocida."
-    )
-
-    action[
-        "priority"
-    ] = "MEDIUM"
-
-    action[
-        "status"
-    ] = "MANUAL_REVIEW_PENDING"
-
-    action[
-        "source_steps"
-    ].update(
-        {
-            "STEP_19",
-            "STEP_20",
-            "STEP_21",
-        }
-    )
-
-    action[
-        "affected_jobs"
-    ].add(
-        job
-    )
-
-    action[
-        "notes"
-    ].add(
-        clean(
-            row.get("blocking_reason")
-        )
-    )
-
-
-# ============================================================
-# Convertir acciones a filas
-# ============================================================
-
-output_rows = []
-
-for action_key, data in actions.items():
-    affected_notebooks = sorted(
-        data[
-            "affected_notebooks"
-        ],
-        key=str.casefold,
-    )
-
-    affected_jobs = sorted(
-        data[
-            "affected_jobs"
-        ],
-        key=str.casefold,
-    )
-
-    output_rows.append({
-        "action_key":
-            action_key,
-
-        "change_type":
-            data[
-                "action_type"
-            ],
-
-        "title":
-            data[
-                "title"
-            ],
-
-        "description":
-            data[
-                "description"
-            ],
-
-        "affected_notebooks":
-            unique_join(
-                affected_notebooks
+        actions.append(make_action(
+            "DATA_VIEW::CREATE_MISSING_UC_VIEW",
+            "VIEW",
+            "Recrear vista persistente requerida en Unity Catalog",
+            "Una vista persistente utilizada por notebooks funcionales existe en Hive PRO, pero no fue encontrada en Unity Catalog.",
+            v,
+            (
+                f"Actualizar la configuración UC asociada ({config_paths}) con el nombre UC de tres partes."
+                if config_paths
+                else "Actualizar la configuración UC asociada con el nombre UC de tres partes."
             ),
+            "Recrear la VIEW en UC adaptando el DDL para referenciar objetos UC de tres partes.",
+            uc_views,
+            source_steps="STEP_14 | STEP_19 | STEP_20",
+            notes=f"Vista PRO: {pro_views}.",
+        ))
 
-        "affected_notebook_count":
-            len(
-                affected_notebooks
-            ),
+    # Keep output deterministic and IDs stable by semantic ordering.
+    # Preserve the historical first three actions and append new action(s).
+    order = {
+        "STORAGE_ABFSS": 10,
+        "ENV_CONFIG_PATH": 20,
+        "DYNAMIC_WORK_SCHEMA": 30,
+        "STORAGE_DBFS_PREFIX": 40,
+        "DATA_OBJECTS": 50,
+        "DATA_VIEW": 60,
+    }
+    actions.sort(key=lambda a: (order.get(a["action_key"].split("::", 1)[0], 999), a["action_key"]))
 
-        "affected_jobs":
-            unique_join(
-                affected_jobs
-            ),
+    rows = []
+    for i, action in enumerate(actions, start=1):
+        rows.append({"action_id": f"ACT-{i:03d}", **action})
 
-        "affected_job_count":
-            len(
-                affected_jobs
-            ),
-
-        "config_change":
-            data[
-                "config_change"
-            ],
-
-        "code_change":
-            data[
-                "code_change"
-            ],
-
-        "target_value":
-            data[
-                "target_value"
-            ],
-
-        "priority":
-            data[
-                "priority"
-            ],
-
-        "status":
-            data[
-                "status"
-            ],
-
-        "source_steps":
-            unique_join(
-                sorted(
-                    data[
-                        "source_steps"
-                    ]
-                )
-            ),
-
-        "notes":
-            unique_join(
-                sorted(
-                    data[
-                        "notes"
-                    ]
-                )
-            ),
-    })
-
-
-# ============================================================
-# Prioridad
-# ============================================================
-
-PRIORITY_ORDER = {
-    "HIGH": 1,
-    "MEDIUM": 2,
-    "LOW": 3,
-}
-
-output_rows.sort(
-    key=lambda row: (
-        PRIORITY_ORDER.get(
-            row[
-                "priority"
-            ],
-            99,
-        ),
-
-        -int(
-            row[
-                "affected_job_count"
-            ]
-        ),
-
-        normalize(
-            row[
-                "change_type"
-            ]
-        ),
-
-        normalize(
-            row[
-                "title"
-            ]
-        ),
-    )
-)
-
-
-# ============================================================
-# Action ID
-# ============================================================
-
-for index, row in enumerate(
-    output_rows,
-    start=1,
-):
-    row[
-        "action_id"
-    ] = (
-        f"ACT-{index:03d}"
-    )
-
-
-# ============================================================
-# CSV
-# ============================================================
-
-fieldnames = [
-    "action_id",
-    "action_key",
-    "change_type",
-    "title",
-    "description",
-    "affected_notebooks",
-    "affected_notebook_count",
-    "affected_jobs",
-    "affected_job_count",
-    "config_change",
-    "code_change",
-    "target_value",
-    "priority",
-    "status",
-    "source_steps",
-    "notes",
-]
-
-OUTPUT_FILE.parent.mkdir(
-    parents=True,
-    exist_ok=True,
-)
-
-with OUTPUT_FILE.open(
-    "w",
-    newline="",
-    encoding="utf-8-sig",
-) as f:
-    writer = csv.DictWriter(
-        f,
-        fieldnames=fieldnames,
-    )
-
-    writer.writeheader()
-    writer.writerows(
-        output_rows
-    )
-
-
-# ============================================================
-# Resumen
-# ============================================================
-
-type_counter = Counter(
-    row[
-        "change_type"
+    columns = [
+        "action_id", "action_key", "change_type", "title", "description",
+        "affected_notebooks", "affected_notebook_count", "affected_jobs",
+        "affected_job_count", "config_change", "code_change", "target_value",
+        "priority", "status", "source_steps", "notes"
     ]
-    for row
-    in output_rows
-)
+    result = pd.DataFrame(rows, columns=columns)
+    result.to_csv(output_path, index=False)
 
-priority_counter = Counter(
-    row[
-        "priority"
-    ]
-    for row
-    in output_rows
-)
-
-status_counter = Counter(
-    row[
-        "status"
-    ]
-    for row
-    in output_rows
-)
-
-affected_jobs = {
-    job
-    for row in output_rows
-    for job in split_multi_value(
-        row.get("affected_jobs")
-    )
-}
-
-affected_notebooks = {
-    notebook
-    for row in output_rows
-    for notebook in split_multi_value(
-        row.get("affected_notebooks")
-    )
-}
-
-
-print("=" * 72)
-print(
-    "ASSESSMENT WORKSPACE - PASO 21"
-)
-print(
-    "BACKLOG MAESTRO DE ACCIONES DE MIGRACION"
-)
-print("=" * 72)
-print()
-
-print(
-    f"Acciones únicas identificadas    : "
-    f"{len(output_rows)}"
-)
-
-print(
-    f"Jobs impactados                  : "
-    f"{len(affected_jobs)}"
-)
-
-print(
-    f"Notebooks impactados             : "
-    f"{len(affected_notebooks)}"
-)
-
-print()
-
-print(
-    "Resumen por tipo:"
-)
-
-for change_type in sorted(
-    type_counter
-):
-    print(
-        f" - {change_type:<28}: "
-        f"{type_counter[change_type]}"
-    )
-
-print()
-
-print(
-    "Resumen por prioridad:"
-)
-
-for priority in [
-    "HIGH",
-    "MEDIUM",
-    "LOW",
-]:
-    print(
-        f" - {priority:<28}: "
-        f"{priority_counter.get(priority, 0)}"
-    )
-
-print()
-
-print(
-    "Resumen por estado:"
-)
-
-for status in sorted(
-    status_counter
-):
-    print(
-        f" - {status:<28}: "
-        f"{status_counter[status]}"
-    )
-
-print()
-
-print(
-    "Acciones:"
-)
-
-for row in output_rows:
-    print(
-        f" - "
-        f"{row['action_id']}"
-        f" | "
-        f"{row['change_type']}"
-        f" | "
-        f"{row['title']}"
-        f" | jobs="
-        f"{row['affected_job_count']}"
-        f" | notebooks="
-        f"{row['affected_notebook_count']}"
-    )
-
-print()
-
-print(
-    f"Archivo generado: "
-    f"{OUTPUT_FILE}"
-)
-
-print()
-print("=" * 72)
+    print(f"Generated: {output_path}")
+    print(f"Master actions: {len(result)}")
+    if not result.empty:
+        print(result[["action_id", "change_type", "title", "affected_notebook_count", "affected_job_count"]].to_string(index=False))
 
 
 if __name__ == "__main__":
-    pass
+    main()
